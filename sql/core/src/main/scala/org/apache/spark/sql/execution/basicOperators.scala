@@ -26,8 +26,8 @@ import org.apache.spark.sql.catalyst.expressions._
 import org.apache.spark.sql.Row
 import org.apache.spark.sql.catalyst.plans.physical._
 import org.apache.spark.util.collection.ExternalSorter
-import org.apache.spark.util.{CompletionIterator, MutablePair}
-import org.apache.spark.{HashPartitioner, SparkEnv}
+import org.apache.spark.util.{BoundedPriorityQueue, CompletionIterator, MutablePair}
+import org.apache.spark._
 
 /**
  * :: DeveloperApi ::
@@ -181,9 +181,19 @@ case class TakeOrderedAndProject(
 
   // TODO: Terminal split should be implemented differently from non-terminal split.
   // TODO: Pick num splits based on |limit|.
-  protected override def doExecute(): RDD[InternalRow] = sparkContext.makeRDD(collectData(), 1)
-
-  override def outputOrdering: Seq[SortOrder] = sortOrder
+  protected override def doExecute(): RDD[InternalRow] = {
+    val rdd: RDD[_ <: Product2[Boolean, InternalRow]] = {
+      child.execute().mapPartitions { items =>
+        util.collection.Utils.takeOrdered(items, limit)(ord).map((false, _))
+      }
+    }
+    val part = new HashPartitioner(1)
+    val shuffled = new ShuffledRDD[Boolean, InternalRow, InternalRow](rdd, part)
+    shuffled.setSerializer(new SparkSqlSerializer(new SparkConf(false)))
+    shuffled.mapPartitions {iter =>
+      util.collection.Utils.takeOrdered(iter.map(_._2), limit)(ord)
+    }
+  }
 }
 
 /**
